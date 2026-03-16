@@ -16,6 +16,7 @@ void check_cuda_status() {
   TORCH_CHECK(err == cudaSuccess, "CUDA kernel launch failed: ", cudaGetErrorString(err));
 }
 
+// naive CUDA implementation
 __global__ void qk_naive_kernel(
     const float* q,
     const float* k,
@@ -25,9 +26,7 @@ __global__ void qk_naive_kernel(
     float inv_sqrt_d) {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int row = blockIdx.y * blockDim.y + threadIdx.y;
-  if (row >= L || col >= L) {
-    return;
-  }
+  if (row >= L || col >= L) return;
 
   float acc = 0.0f;
   for (int idx = 0; idx < d; ++idx) {
@@ -244,6 +243,80 @@ __global__ void softmax_warp_kernel(
   }
 }
 
+__global__ void softmax_pv_fused_kernel(
+    const float* scores,
+    const float* v,
+    float* out,
+    int L,
+    int d) {
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+  const int lane = tid & (warpSize - 1);
+  const int warp = tid / warpSize;
+  const int num_warps = blockDim.x / warpSize;
+
+  __shared__ float warp_partials[32];
+  __shared__ float weight_tile[kTile];
+
+  float local_max = -FLT_MAX;
+  for (int col = tid; col < L; col += blockDim.x) {
+    local_max = fmaxf(local_max, scores[row * L + col]);
+  }
+  local_max = warp_reduce_max(local_max);
+  if (lane == 0) {
+    warp_partials[warp] = local_max;
+  }
+  __syncthreads();
+
+  if (warp == 0) {
+    float value = (lane < num_warps) ? warp_partials[lane] : -FLT_MAX;
+    value = warp_reduce_max(value);
+    if (lane == 0) {
+      warp_partials[0] = value;
+    }
+  }
+  __syncthreads();
+  const float row_max = warp_partials[0];
+
+  float local_sum = 0.0f;
+  for (int col = tid; col < L; col += blockDim.x) {
+    local_sum += expf(scores[row * L + col] - row_max);
+  }
+  local_sum = warp_reduce_sum(local_sum);
+  if (lane == 0) {
+    warp_partials[warp] = local_sum;
+  }
+  __syncthreads();
+
+  if (warp == 0) {
+    float value = (lane < num_warps) ? warp_partials[lane] : 0.0f;
+    value = warp_reduce_sum(value);
+    if (lane == 0) {
+      warp_partials[0] = value;
+    }
+  }
+  __syncthreads();
+  const float inv_row_sum = 1.0f / warp_partials[0];
+
+  for (int out_col = tid; out_col < d; out_col += blockDim.x) {
+    float acc = 0.0f;
+    for (int col_base = 0; col_base < L; col_base += kTile) {
+      if (tid < kTile) {
+        const int col = col_base + tid;
+        weight_tile[tid] = (col < L) ? expf(scores[row * L + col] - row_max) * inv_row_sum : 0.0f;
+      }
+      __syncthreads();
+
+      const int tile_width = min(kTile, L - col_base);
+      for (int tile_col = 0; tile_col < tile_width; ++tile_col) {
+        acc += weight_tile[tile_col] * v[(col_base + tile_col) * d + out_col];
+      }
+      __syncthreads();
+    }
+    out[row * d + out_col] = acc;
+  }
+}
+
 }  // namespace
 
 torch::Tensor attention_forward_naive_cuda(
@@ -321,6 +394,40 @@ torch::Tensor attention_forward_tiled_cuda(
 
   pv_tiled_kernel<<<pv_grid, mm_block>>>(
       probs.data_ptr<float>(),
+      v.data_ptr<float>(),
+      out.data_ptr<float>(),
+      L,
+      d);
+  check_cuda_status();
+
+  return out;
+}
+
+torch::Tensor attention_forward_fused_softmax_pv_cuda(
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v) {
+  const int L = static_cast<int>(q.size(0));
+  const int d = static_cast<int>(q.size(1));
+  const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+
+  auto scores = torch::empty({L, L}, q.options());
+  auto out = torch::empty({L, d}, q.options());
+
+  dim3 mm_block(kTile, kTile);
+  dim3 qk_grid((L + kTile - 1) / kTile, (L + kTile - 1) / kTile);
+
+  qk_tiled_kernel<<<qk_grid, mm_block>>>(
+      q.data_ptr<float>(),
+      k.data_ptr<float>(),
+      scores.data_ptr<float>(),
+      L,
+      d,
+      inv_sqrt_d);
+  check_cuda_status();
+
+  softmax_pv_fused_kernel<<<L, kSoftmaxThreads>>>(
+      scores.data_ptr<float>(),
       v.data_ptr<float>(),
       out.data_ptr<float>(),
       L,

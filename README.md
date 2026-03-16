@@ -14,6 +14,12 @@ https://gist.github.com/Kaixhin/dc6f73099334a5d41d20804e70ae7f7b
 - `cpu_baseline`: the copied PyTorch baseline running on CPU tensors.
 - `gpu_naive`: three CUDA kernels using global-memory matmuls plus a shared-memory row softmax reduction.
 - `gpu_tiled`: shared-memory tiled matmuls for `QK^T` and `P@V`, plus warp-shuffle reductions for the row-wise softmax max and sum.
+- `gpu_fused_softmax_pv`: tiled `QK^T`, followed by a fused softmax + `P@V` kernel that avoids materializing the probability matrix.
+- `gpu_official_pytorch`: an official / industrial reference implemented in `official_attention.py`, which wraps PyTorch GPU attention paths and picks the faster path for this lab machine.
+
+Note:
+
+- `gpu_official_pytorch` is the main production reference used in the plots and tables.
 
 ## Constraints
 
@@ -76,11 +82,24 @@ It also auto-selects a newer `gcc-toolset` if the default `g++` is older than Py
 python bench.py --check
 ```
 
-This compares both custom CUDA implementations against the PyTorch GPU reference with:
+This compares all custom CUDA implementations against the PyTorch GPU reference with:
 
 ```python
 torch.allclose(..., rtol=1e-3, atol=1e-3)
 ```
+
+Covered CUDA variants:
+
+- `attention_forward_naive`
+- `attention_forward_tiled`
+- `attention_forward_fused_softmax_pv`
+
+Covered benchmarked GPU paths:
+
+- `attention_forward_naive`
+- `attention_forward_tiled`
+- `attention_forward_fused_softmax_pv`
+- `attention_official_best`
 
 ## Run Benchmarks
 
@@ -103,6 +122,11 @@ Notes:
 
 - GPU timings use CUDA events.
 - CPU baseline timings use `time.perf_counter()` because CUDA events cannot time CPU-only execution.
+- The benchmark includes `gpu_naive`, `gpu_tiled`, `gpu_fused_softmax_pv`, and `gpu_official_pytorch`.
+- `gpu_official_pytorch` uses a small empirical heuristic for this RTX 2060 SUPER machine:
+  - default PyTorch `scaled_dot_product_attention` for smaller shapes
+  - eager `QK^T -> softmax -> PV` with PyTorch GPU kernels for larger shapes
+- The benchmark CSV includes a `variant` column so you can see which official path was selected at each `(L, d)`.
 
 ## Generate Plots
 

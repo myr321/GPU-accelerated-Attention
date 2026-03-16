@@ -8,6 +8,7 @@ import torch
 
 import attention_ext
 from baseline_attention import attention_baseline
+from official_attention import attention_official_best, select_official_variant
 
 
 DEFAULT_LS = [64, 128, 256, 512, 1024]
@@ -63,18 +64,28 @@ def run_correctness_case(L, d):
         reference = attention_baseline(q, k, v)
         naive = attention_ext.attention_forward_naive(q, k, v)
         tiled = attention_ext.attention_forward_tiled(q, k, v)
+        fused = attention_ext.attention_forward_fused_softmax_pv(q, k, v)
+        official = attention_official_best(q, k, v)
 
     naive_err = (naive - reference).abs().max().item()
     tiled_err = (tiled - reference).abs().max().item()
+    fused_err = (fused - reference).abs().max().item()
+    official_err = (official - reference).abs().max().item()
     naive_ok = torch.allclose(naive, reference, rtol=1e-3, atol=1e-3)
     tiled_ok = torch.allclose(tiled, reference, rtol=1e-3, atol=1e-3)
+    fused_ok = torch.allclose(fused, reference, rtol=1e-3, atol=1e-3)
+    official_ok = torch.allclose(official, reference, rtol=1e-3, atol=1e-3)
     return {
         "L": L,
         "d": d,
         "naive_max_abs_err": naive_err,
         "tiled_max_abs_err": tiled_err,
+        "fused_max_abs_err": fused_err,
+        "official_max_abs_err": official_err,
         "naive_ok": naive_ok,
         "tiled_ok": tiled_ok,
+        "fused_ok": fused_ok,
+        "official_ok": official_ok,
     }
 
 
@@ -90,9 +101,11 @@ def run_correctness():
         print(
             f"  L={L:4d}, d={d:3d} | "
             f"naive err={result['naive_max_abs_err']:.6f}, "
-            f"tiled err={result['tiled_max_abs_err']:.6f}"
+            f"tiled err={result['tiled_max_abs_err']:.6f}, "
+            f"fused err={result['fused_max_abs_err']:.6f}, "
+            f"official err={result['official_max_abs_err']:.6f}"
         )
-        if not (result["naive_ok"] and result["tiled_ok"]):
+        if not (result["naive_ok"] and result["tiled_ok"] and result["fused_ok"] and result["official_ok"]):
             all_ok = False
     if not all_ok:
         raise RuntimeError("Correctness checks failed.")
@@ -115,17 +128,50 @@ def benchmark_shape(L, d, warmup, iters):
         tiled_mean, tiled_std = measure_cuda(
             lambda: attention_ext.attention_forward_tiled(q_gpu, k_gpu, v_gpu), warmup, iters
         )
+        fused_mean, fused_std = measure_cuda(
+            lambda: attention_ext.attention_forward_fused_softmax_pv(q_gpu, k_gpu, v_gpu), warmup, iters
+        )
+        official_variant = select_official_variant(L, d)
+        official_mean, official_std = measure_cuda(
+            lambda: attention_official_best(q_gpu, k_gpu, v_gpu), warmup, iters
+        )
 
     return [
-        {"L": L, "d": d, "method": "cpu_baseline", "mean_ms": cpu_mean, "std_ms": cpu_std},
-        {"L": L, "d": d, "method": "gpu_naive", "mean_ms": naive_mean, "std_ms": naive_std},
-        {"L": L, "d": d, "method": "gpu_tiled", "mean_ms": tiled_mean, "std_ms": tiled_std},
+        {"L": L, "d": d, "method": "cpu_baseline", "variant": "", "mean_ms": cpu_mean, "std_ms": cpu_std},
+        {"L": L, "d": d, "method": "gpu_naive", "variant": "", "mean_ms": naive_mean, "std_ms": naive_std},
+        {"L": L, "d": d, "method": "gpu_tiled", "variant": "", "mean_ms": tiled_mean, "std_ms": tiled_std},
+        {
+            "L": L,
+            "d": d,
+            "method": "gpu_fused_softmax_pv",
+            "variant": "",
+            "mean_ms": fused_mean,
+            "std_ms": fused_std,
+        },
+        {
+            "L": L,
+            "d": d,
+            "method": "gpu_official_pytorch",
+            "variant": official_variant,
+            "mean_ms": official_mean,
+            "std_ms": official_std,
+        },
     ]
 
 
 def write_csv(rows, device_name, cuda_version, torch_version):
     RESULTS_DIR.mkdir(exist_ok=True)
-    fieldnames = ["L", "d", "method", "mean_ms", "std_ms", "device_name", "cuda_version", "torch_version"]
+    fieldnames = [
+        "L",
+        "d",
+        "method",
+        "variant",
+        "mean_ms",
+        "std_ms",
+        "device_name",
+        "cuda_version",
+        "torch_version",
+    ]
     with CSV_PATH.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -148,6 +194,8 @@ def write_summary(rows, device_name, cuda_version):
 
     best_speedup = 0.0
     best_row = None
+    best_official = None
+    official_variant_counts = {}
     for row in rows:
         if row["method"] == "cpu_baseline":
             continue
@@ -155,6 +203,10 @@ def write_summary(rows, device_name, cuda_version):
         if speedup > best_speedup:
             best_speedup = speedup
             best_row = {**row, "speedup": speedup}
+        if row["method"] == "gpu_official_pytorch":
+            official_variant_counts[row["variant"]] = official_variant_counts.get(row["variant"], 0) + 1
+            if best_official is None or speedup > best_official["speedup"]:
+                best_official = {**row, "speedup": speedup}
 
     lines = [
         "# Benchmark Summary",
@@ -163,8 +215,13 @@ def write_summary(rows, device_name, cuda_version):
         f"- CUDA version: {cuda_version}",
         f"- Best speedup observed: {best_row['speedup']:.2f}x using {best_row['method']} at L={best_row['L']}, d={best_row['d']}" if best_row else "- Best speedup observed: not available",
         "- gpu_tiled optimizations: shared-memory tiling for QK^T and P@V, plus warp-shuffle row reductions for softmax max/sum.",
+        "- gpu_fused_softmax_pv optimizations: shared-memory tiled QK^T plus a fused softmax + P@V kernel that avoids materializing the probability matrix.",
+        "- gpu_official_pytorch implementation: wraps official PyTorch GPU attention paths and uses an empirical shape heuristic to choose between default scaled_dot_product_attention and eager GEMM + softmax.",
+        "- gpu_official_pytorch machine note: this sm75 RTX 2060 SUPER cannot use the newest fused SDPA backend available on newer GPUs, so the official comparison uses the fastest supported path on this lab machine.",
+        f"- gpu_official_pytorch variant counts: {official_variant_counts}" if official_variant_counts else "- gpu_official_pytorch variant counts: not available",
+        f"- Best gpu_official_pytorch speedup: {best_official['speedup']:.2f}x at L={best_official['L']}, d={best_official['d']} using {best_official['variant']}" if best_official else "- Best gpu_official_pytorch speedup: not available",
         f"- Max L tested: {max(row['L'] for row in rows) if rows else 'N/A'}",
-        "- Memory notes: both GPU kernels materialize the LxL score/probability matrices in global memory.",
+        "- Memory notes: gpu_naive and gpu_tiled materialize both LxL score/probability matrices; gpu_fused_softmax_pv keeps scores but avoids writing the probability matrix; gpu_official_pytorch uses PyTorch library kernels instead of custom global buffers in this project code.",
         "- Limitations: batch=1, single head, float32 only, contiguous [L, d] tensors only.",
     ]
     SUMMARY_PATH.write_text("\n".join(lines) + "\n")

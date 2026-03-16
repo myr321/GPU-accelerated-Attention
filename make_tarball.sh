@@ -19,9 +19,11 @@ tar -czf "${OUTPUT_TAR}" \
   Proposal.pdf \
   codex_instructions.md \
   baseline_attention.py \
+  official_attention.py \
   bench.py \
   plot.py \
   README.md \
+  workflow.md \
   requirements.txt \
   setup.py \
   make_tarball.sh \

@@ -36,6 +36,11 @@ torch::Tensor attention_forward_tiled_cuda(
     const torch::Tensor& k,
     const torch::Tensor& v);
 
+torch::Tensor attention_forward_fused_softmax_pv_cuda(
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v);
+
 torch::Tensor attention_forward_naive(
     const torch::Tensor& q,
     const torch::Tensor& k,
@@ -54,7 +59,20 @@ torch::Tensor attention_forward_tiled(
   return attention_forward_tiled_cuda(q, k, v);
 }
 
+torch::Tensor attention_forward_fused_softmax_pv(
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v) {
+  check_attention_inputs(q, k, v);
+  c10::cuda::CUDAGuard device_guard(q.device());
+  return attention_forward_fused_softmax_pv_cuda(q, k, v);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("attention_forward_naive", &attention_forward_naive, "Naive attention forward (CUDA)");
   m.def("attention_forward_tiled", &attention_forward_tiled, "Tiled attention forward (CUDA)");
+  m.def(
+      "attention_forward_fused_softmax_pv",
+      &attention_forward_fused_softmax_pv,
+      "Fused softmax + P@V attention forward (CUDA)");
 }

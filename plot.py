@@ -13,6 +13,8 @@ METHOD_STYLES = {
     "cpu_baseline": {"label": "cpu_baseline", "color": "#1b4965"},
     "gpu_naive": {"label": "gpu_naive", "color": "#ca6702"},
     "gpu_tiled": {"label": "gpu_tiled", "color": "#2a9d8f"},
+    "gpu_fused_softmax_pv": {"label": "gpu_fused_softmax_pv", "color": "#7f5539"},
+    "gpu_official_pytorch": {"label": "gpu_official_pytorch", "color": "#7c3aed"},
 }
 
 
@@ -29,7 +31,7 @@ def plot_runtime(df):
 
     for axis, d in zip(axes, ds):
         subset = df[df["d"] == d]
-        for method in ["cpu_baseline", "gpu_naive", "gpu_tiled"]:
+        for method in ["cpu_baseline", "gpu_naive", "gpu_tiled", "gpu_fused_softmax_pv", "gpu_official_pytorch"]:
             method_df = subset[subset["method"] == method].sort_values("L")
             if method_df.empty:
                 continue
@@ -63,7 +65,7 @@ def plot_speedup(df):
 
     for axis, d in zip(axes, ds):
         subset = gpu_df[gpu_df["d"] == d]
-        for method in ["gpu_naive", "gpu_tiled"]:
+        for method in ["gpu_naive", "gpu_tiled", "gpu_fused_softmax_pv", "gpu_official_pytorch"]:
             method_df = subset[subset["method"] == method].sort_values("L")
             if method_df.empty:
                 continue
