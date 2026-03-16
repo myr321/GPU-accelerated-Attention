@@ -1,13 +1,9 @@
-# Official / industrial attention reference used in the benchmark.
+# Official attention reference used in the benchmark.
 #
 # References:
 # - https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
 # - https://pytorch.org/docs/stable/generated/torch.nn.attention.sdpa_kernel.html
 # - https://pytorch.org/tutorials/intermediate/scaled_dot_product_attention_tutorial.html
-#
-# This file does not vendor external code. It wraps the official PyTorch
-# attention implementations that are available on this machine and selects the
-# faster path for the project workload on the RTX 2060 SUPER lab GPU.
 
 import torch
 import torch.nn.functional as F
@@ -44,9 +40,8 @@ def attention_official_eager(q, k, v):
 
 
 def select_official_variant(L, d):
-    # Empirical heuristic for the RTX 2060 SUPER lab machine:
-    # default SDPA wins on the smaller shapes in this project, while the eager
-    # GEMM + softmax path wins once the problem gets larger on this sm75 GPU.
+    # default SDPA wins on the smaller shapes, 
+    # while eager GEMM + softmax wins when problem gets larger (in my machine)
     if L <= 256 and L * d <= 32768:
         return "sdpa_default"
     return "eager_gemm_softmax"

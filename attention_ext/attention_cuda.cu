@@ -16,7 +16,7 @@ void check_cuda_status() {
   TORCH_CHECK(err == cudaSuccess, "CUDA kernel launch failed: ", cudaGetErrorString(err));
 }
 
-// naive CUDA implementation
+// naive CUDA implementation kernel1
 __global__ void qk_naive_kernel(
     const float* q,
     const float* k,
@@ -27,7 +27,8 @@ __global__ void qk_naive_kernel(
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int row = blockIdx.y * blockDim.y + threadIdx.y;
   if (row >= L || col >= L) return;
-
+  
+  // score matrix S = Q @ K' / sqrt(d)
   float acc = 0.0f;
   for (int idx = 0; idx < d; ++idx) {
     acc += q[row * d + idx] * k[col * d + idx];
@@ -35,6 +36,7 @@ __global__ void qk_naive_kernel(
   scores[row * L + col] = acc * inv_sqrt_d;
 }
 
+// naive CUDA implementation kernel2
 __global__ void pv_naive_kernel(
     const float* probs,
     const float* v,
@@ -43,10 +45,9 @@ __global__ void pv_naive_kernel(
     int d) {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int row = blockIdx.y * blockDim.y + threadIdx.y;
-  if (row >= L || col >= d) {
-    return;
-  }
-
+  if (row >= L || col >= d) return;
+  
+  // P @ V
   float acc = 0.0f;
   for (int idx = 0; idx < L; ++idx) {
     acc += probs[row * L + idx] * v[idx * d + col];
@@ -54,6 +55,7 @@ __global__ void pv_naive_kernel(
   out[row * d + col] = acc;
 }
 
+// naive CUDA implementation kernel3
 __global__ void softmax_naive_kernel(
     const float* scores,
     float* probs,
@@ -67,8 +69,10 @@ __global__ void softmax_naive_kernel(
     local_max = fmaxf(local_max, scores[row * L + col]);
   }
   shared[tid] = local_max;
+  // each thread puts its local maximum into shared memory
   __syncthreads();
 
+  // tree reduction
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
     if (tid < stride) {
       shared[tid] = fmaxf(shared[tid], shared[tid + stride]);
@@ -86,6 +90,7 @@ __global__ void softmax_naive_kernel(
   shared[tid] = local_sum;
   __syncthreads();
 
+  // sum reduction
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
     if (tid < stride) {
       shared[tid] += shared[tid + stride];
@@ -101,6 +106,7 @@ __global__ void softmax_naive_kernel(
 
 __device__ __forceinline__ float warp_reduce_max(float value) {
   for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+    // use warp shuffle intrinsics
     value = fmaxf(value, __shfl_down_sync(0xffffffff, value, offset));
   }
   return value;
@@ -113,6 +119,7 @@ __device__ __forceinline__ float warp_reduce_sum(float value) {
   return value;
 }
 
+// do tiled mat mul
 __global__ void qk_tiled_kernel(
     const float* q,
     const float* k,
@@ -298,6 +305,7 @@ __global__ void softmax_pv_fused_kernel(
   __syncthreads();
   const float inv_row_sum = 1.0f / warp_partials[0];
 
+  // do softmax and P@V together in a block, not sending P to global memory
   for (int out_col = tid; out_col < d; out_col += blockDim.x) {
     float acc = 0.0f;
     for (int col_base = 0; col_base < L; col_base += kTile) {

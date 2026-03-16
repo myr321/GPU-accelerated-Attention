@@ -15,7 +15,6 @@ DEFAULT_LS = [64, 128, 256, 512, 1024]
 DEFAULT_DS = [32, 64, 128, 256]
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 CSV_PATH = RESULTS_DIR / "bench.csv"
-SUMMARY_PATH = RESULTS_DIR / "README_results.md"
 
 
 def parse_int_list(values):
@@ -186,47 +185,6 @@ def write_csv(rows, device_name, cuda_version, torch_version):
             )
 
 
-def write_summary(rows, device_name, cuda_version):
-    cpu_lookup = {}
-    for row in rows:
-        if row["method"] == "cpu_baseline":
-            cpu_lookup[(row["L"], row["d"])] = row["mean_ms"]
-
-    best_speedup = 0.0
-    best_row = None
-    best_official = None
-    official_variant_counts = {}
-    for row in rows:
-        if row["method"] == "cpu_baseline":
-            continue
-        speedup = cpu_lookup[(row["L"], row["d"])] / row["mean_ms"]
-        if speedup > best_speedup:
-            best_speedup = speedup
-            best_row = {**row, "speedup": speedup}
-        if row["method"] == "gpu_official_pytorch":
-            official_variant_counts[row["variant"]] = official_variant_counts.get(row["variant"], 0) + 1
-            if best_official is None or speedup > best_official["speedup"]:
-                best_official = {**row, "speedup": speedup}
-
-    lines = [
-        "# Benchmark Summary",
-        "",
-        f"- GPU model name: {device_name}",
-        f"- CUDA version: {cuda_version}",
-        f"- Best speedup observed: {best_row['speedup']:.2f}x using {best_row['method']} at L={best_row['L']}, d={best_row['d']}" if best_row else "- Best speedup observed: not available",
-        "- gpu_tiled optimizations: shared-memory tiling for QK^T and P@V, plus warp-shuffle row reductions for softmax max/sum.",
-        "- gpu_fused_softmax_pv optimizations: shared-memory tiled QK^T plus a fused softmax + P@V kernel that avoids materializing the probability matrix.",
-        "- gpu_official_pytorch implementation: wraps official PyTorch GPU attention paths and uses an empirical shape heuristic to choose between default scaled_dot_product_attention and eager GEMM + softmax.",
-        "- gpu_official_pytorch machine note: this sm75 RTX 2060 SUPER cannot use the newest fused SDPA backend available on newer GPUs, so the official comparison uses the fastest supported path on this lab machine.",
-        f"- gpu_official_pytorch variant counts: {official_variant_counts}" if official_variant_counts else "- gpu_official_pytorch variant counts: not available",
-        f"- Best gpu_official_pytorch speedup: {best_official['speedup']:.2f}x at L={best_official['L']}, d={best_official['d']} using {best_official['variant']}" if best_official else "- Best gpu_official_pytorch speedup: not available",
-        f"- Max L tested: {max(row['L'] for row in rows) if rows else 'N/A'}",
-        "- Memory notes: gpu_naive and gpu_tiled materialize both LxL score/probability matrices; gpu_fused_softmax_pv keeps scores but avoids writing the probability matrix; gpu_official_pytorch uses PyTorch library kernels instead of custom global buffers in this project code.",
-        "- Limitations: batch=1, single head, float32 only, contiguous [L, d] tensors only.",
-    ]
-    SUMMARY_PATH.write_text("\n".join(lines) + "\n")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Benchmark CUDA attention forward kernels.")
     parser.add_argument("--check", action="store_true", help="Run correctness checks and exit.")
@@ -263,9 +221,7 @@ def main():
                 raise
 
     write_csv(rows, device_name, cuda_version, torch_version)
-    write_summary(rows, device_name, cuda_version)
     print(f"Wrote {CSV_PATH}")
-    print(f"Wrote {SUMMARY_PATH}")
 
 
 if __name__ == "__main__":

@@ -9,17 +9,42 @@ https://nlp.seas.harvard.edu/2018/04/03/attention.html
 https://gist.github.com/Kaixhin/dc6f73099334a5d41d20804e70ae7f7b
 ```
 
+## Inputs
+
+Core attention inputs:
+
+- `Q`, `K`, `V` tensors with shape `[L, d]`
+- all three must have the same shape
+- custom CUDA kernels expect CUDA tensors, `float32`, and contiguous layout
+- batch size and number of heads are both fixed to `1`,
+- no mask input
+- no dropout input
+
+Example:
+
+```python
+L, d = 256, 128
+q = torch.randn(L, d, device="cuda", dtype=torch.float32).contiguous()
+k = torch.randn(L, d, device="cuda", dtype=torch.float32).contiguous()
+v = torch.randn(L, d, device="cuda", dtype=torch.float32).contiguous()
+```
+
+Benchmark script inputs:
+
+- `--Ls`: sequence lengths to test
+- `--ds`: hidden sizes to test
+- `--warmup`: warmup iterations per shape
+- `--iters`: timed iterations per shape
+
+(Randomly generated matrices)
+
 ## Implemented Versions
 
 - `cpu_baseline`: the copied PyTorch baseline running on CPU tensors.
 - `gpu_naive`: three CUDA kernels using global-memory matmuls plus a shared-memory row softmax reduction.
 - `gpu_tiled`: shared-memory tiled matmuls for `QK^T` and `P@V`, plus warp-shuffle reductions for the row-wise softmax max and sum.
 - `gpu_fused_softmax_pv`: tiled `QK^T`, followed by a fused softmax + `P@V` kernel that avoids materializing the probability matrix.
-- `gpu_official_pytorch`: an official / industrial reference implemented in `official_attention.py`, which wraps PyTorch GPU attention paths and picks the faster path for this lab machine.
-
-Note:
-
-- `gpu_official_pytorch` is the main production reference used in the plots and tables.
+- `gpu_official_pytorch`: an official reference implemented in `official_attention.py`, which wraps PyTorch GPU attention paths and picks the faster path for comparison.
 
 ## Constraints
 
@@ -29,24 +54,20 @@ Note:
 - contiguous tensors only
 - no mask, no dropout
 
-## Lab Machine Setup
-
-Use the lab CUDA environment script before building:
+## Setup (in Lab Machine)
+CUDA and gcc environment:
 
 ```bash
 source ~hardav/cuda/cuda-env.sh
 ```
-
-If your shell still points at an older system compiler, you can also enable the newer toolchain explicitly:
-
 ```bash
 source /opt/rh/gcc-toolset-13/enable
 ```
 
-Create a Python environment. The system has Python 3.11 available:
+Create a Python environment:
 
 ```bash
-cd /home/mic6954/CE468/Project
+cd .../Project
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -73,7 +94,7 @@ Or build the extension in place:
 python setup.py build_ext --inplace
 ```
 
-The build script defaults `TORCH_CUDA_ARCH_LIST` to `7.5` for the RTX 2060 class GPU used in lab.
+The build script defaults `TORCH_CUDA_ARCH_LIST` to `7.5` for the RTX 2060 GPU.
 It also auto-selects a newer `gcc-toolset` if the default `g++` is older than PyTorch requires.
 
 ## Run Correctness Checks
@@ -82,7 +103,7 @@ It also auto-selects a newer `gcc-toolset` if the default `g++` is older than Py
 python bench.py --check
 ```
 
-This compares all custom CUDA implementations against the PyTorch GPU reference with:
+This compares all custom CUDA implementations against the PyTorch baseline with:
 
 ```python
 torch.allclose(..., rtol=1e-3, atol=1e-3)
@@ -113,20 +134,9 @@ Useful overrides while iterating:
 python bench.py --iters 10 --warmup 5 --Ls 64 128 256 --ds 32 64
 ```
 
-Benchmark outputs:
+Benchmark outputs in:
 
 - `results/bench.csv`
-- `results/README_results.md`
-
-Notes:
-
-- GPU timings use CUDA events.
-- CPU baseline timings use `time.perf_counter()` because CUDA events cannot time CPU-only execution.
-- The benchmark includes `gpu_naive`, `gpu_tiled`, `gpu_fused_softmax_pv`, and `gpu_official_pytorch`.
-- `gpu_official_pytorch` uses a small empirical heuristic for this RTX 2060 SUPER machine:
-  - default PyTorch `scaled_dot_product_attention` for smaller shapes
-  - eager `QK^T -> softmax -> PV` with PyTorch GPU kernels for larger shapes
-- The benchmark CSV includes a `variant` column so you can see which official path was selected at each `(L, d)`.
 
 ## Generate Plots
 
@@ -134,15 +144,7 @@ Notes:
 python plot.py
 ```
 
-This writes:
+Outputs in:
 
 - `results/runtime_vs_L.png`
 - `results/speedup_vs_L.png`
-
-## Package Submission
-
-```bash
-bash make_tarball.sh
-```
-
-This creates `final_submission.tar.gz` with source files, build instructions, and the `results/` folder.

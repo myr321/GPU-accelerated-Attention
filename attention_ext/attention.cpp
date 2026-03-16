@@ -69,10 +69,7 @@ torch::Tensor attention_forward_fused_softmax_pv(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("attention_forward_naive", &attention_forward_naive, "Naive attention forward (CUDA)");
-  m.def("attention_forward_tiled", &attention_forward_tiled, "Tiled attention forward (CUDA)");
-  m.def(
-      "attention_forward_fused_softmax_pv",
-      &attention_forward_fused_softmax_pv,
-      "Fused softmax + P@V attention forward (CUDA)");
+  m.def("attention_forward_naive", &attention_forward_naive, "Naive attention forward");
+  m.def("attention_forward_tiled", &attention_forward_tiled, "Tiled attention forward");
+  m.def("attention_forward_fused_softmax_pv", &attention_forward_fused_softmax_pv, "Fused softmax + P@V attention forward");
 }
